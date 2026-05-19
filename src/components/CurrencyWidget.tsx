@@ -49,13 +49,13 @@ export default function CurrencyWidget({ destination, totalEstimate }: Props) {
     let cancelled = false;
     async function fetchRate() {
       try {
-        const res = await fetch(
-          `https://api.frankfurter.app/latest?from=${currency.code}&to=KRW`
-        );
+        // Use our own API proxy to avoid Frankfurter CORS blocking from
+        // browser direct calls on Vercel-hosted origins.
+        const res = await fetch(`/api/exchange-rate?from=${currency.code}&to=KRW`);
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
         const data = await res.json();
         if (cancelled) return;
-        const rate = data?.rates?.KRW;
+        const rate = data?.rate;
         if (typeof rate !== "number" || !isFinite(rate) || rate <= 0) {
           throw new Error("invalid rate");
         }
