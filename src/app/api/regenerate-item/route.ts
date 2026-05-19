@@ -1,5 +1,6 @@
 import Groq from "groq-sdk";
 import { NextRequest, NextResponse } from "next/server";
+import { isCoordPlausible, geocodeWithNominatim } from "@/lib/llmHelpers";
 
 const STYLE_GUIDE: Record<string, string> = {
   healing:   "조용한 힐링 스폿(온천, 카페, 공원 등)",
@@ -175,19 +176,16 @@ Generate ONE alternative place. Same time, same category, similar duration. Outp
       );
     }
 
-    // Normalize coords (drop if malformed)
+    // Normalize coords via shared helper (drops malformed or out-of-region coords)
     let coords: { lat: number; lng: number } | undefined;
-    if (
-      it.coords &&
-      typeof it.coords.lat === "number" &&
-      typeof it.coords.lng === "number" &&
-      isFinite(it.coords.lat) &&
-      isFinite(it.coords.lng) &&
-      !(it.coords.lat === 0 && it.coords.lng === 0) &&
-      Math.abs(it.coords.lat) <= 90 &&
-      Math.abs(it.coords.lng) <= 180
-    ) {
-      coords = { lat: it.coords.lat, lng: it.coords.lng };
+    if (isCoordPlausible(it.coords, b.destination)) {
+      coords = { lat: it.coords!.lat as number, lng: it.coords!.lng as number };
+    } else {
+      // Best-effort: ask Nominatim for the new place — single lookup, cheap
+      const recovered = await geocodeWithNominatim(it.place.trim(), b.destination);
+      if (recovered && isCoordPlausible(recovered, b.destination)) {
+        coords = recovered;
+      }
     }
 
     // Compose final response — preserve original time, fall back where AI omitted

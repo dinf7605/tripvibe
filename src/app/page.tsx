@@ -5,7 +5,7 @@ import { useRouter } from "next/navigation";
 import Link from "next/link";
 import { useAuth } from "@/context/AuthContext";
 import { supabase } from "@/lib/supabase";
-import { MapPin, Clock, Sparkles, Search, ChevronRight, Globe, Star, Compass, AlertCircle, X } from "lucide-react";
+import { MapPin, Clock, Sparkles, Search, ChevronRight, Globe, Star, Compass, AlertCircle, X, Calendar } from "lucide-react";
 import ThemeToggle from "@/components/ThemeToggle";
 
 // ── Types ──────────────────────────────────────────────
@@ -78,11 +78,16 @@ export default function HomePage() {
   const { user, signOut } = useAuth();
   const [destination, setDestination] = useState("");
   const [duration, setDuration] = useState("");
+  const [startDate, setStartDate] = useState("");
   const [selectedStyles, setSelectedStyles] = useState<string[]>([]);
   const [showSuggestions, setShowSuggestions] = useState(false);
   const [isLoading, setIsLoading] = useState(false);
   const [loadingMsg, setLoadingMsg] = useState("");
+  const [loadingProgress, setLoadingProgress] = useState(0);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
+  // When streaming progress messages arrive, the interval-based message
+  // rotation pauses so we don't overwrite real status with random copy.
+  const [streamingActive, setStreamingActive] = useState(false);
 
   useEffect(() => {
     if (!errorMsg) return;
@@ -90,9 +95,11 @@ export default function HomePage() {
     return () => clearTimeout(t);
   }, [errorMsg]);
 
-  // Rotate loading messages every 1.4s while generating
+  // Rotate loading messages every 1.4s while generating — but only while
+  // streaming isn't sending real status. Once the API starts streaming
+  // progress events, we hand control over to those.
   useEffect(() => {
-    if (!isLoading) return;
+    if (!isLoading || streamingActive) return;
     const messages = buildLoadingMessages(destination, selectedStyles);
     let i = 0;
     setLoadingMsg(messages[0]);
@@ -101,7 +108,7 @@ export default function HomePage() {
       setLoadingMsg(messages[i]);
     }, 1400);
     return () => clearInterval(interval);
-  }, [isLoading, destination, selectedStyles]);
+  }, [isLoading, streamingActive, destination, selectedStyles]);
 
   const filteredSuggestions = destination.length > 0
     ? POPULAR_DESTINATIONS.filter(d => d.includes(destination))
@@ -119,21 +126,61 @@ export default function HomePage() {
     if (!canGenerate || isLoading) return;
     setIsLoading(true);
     setErrorMsg(null);
-    // loadingMsg is set & rotated by the useEffect tied to isLoading
+    setLoadingProgress(0);
+    setStreamingActive(false);
 
     try {
       const res = await fetch("/api/generate", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ destination, duration, styles: selectedStyles }),
+        body: JSON.stringify({ destination, duration, styles: selectedStyles, startDate }),
       });
 
-      if (!res.ok) {
-        const data = await res.json().catch(() => ({}));
-        throw new Error(data.error ?? "일정 생성에 실패했습니다.");
+      if (!res.ok || !res.body) {
+        const text = await res.text().catch(() => "");
+        let errMsg = "일정 생성에 실패했습니다.";
+        try {
+          const parsed = JSON.parse(text);
+          if (parsed?.error) errMsg = parsed.error;
+        } catch { /* ignore */ }
+        throw new Error(errMsg);
       }
 
-      const itinerary = await res.json();
+      // ── Stream NDJSON events from the server ──
+      const reader = res.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = "";
+      let itinerary: unknown = null;
+      let streamErr: string | null = null;
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split("\n");
+        buffer = lines.pop() ?? "";
+        for (const line of lines) {
+          if (!line.trim()) continue;
+          let event: { type?: string; message?: string; progress?: number; data?: unknown; error?: string };
+          try {
+            event = JSON.parse(line);
+          } catch {
+            continue; // skip malformed line
+          }
+          if (event.type === "progress") {
+            setStreamingActive(true);
+            if (typeof event.message === "string") setLoadingMsg(event.message);
+            if (typeof event.progress === "number") setLoadingProgress(event.progress);
+          } else if (event.type === "done") {
+            itinerary = event.data ?? null;
+          } else if (event.type === "error") {
+            streamErr = event.error ?? "AI 응답 처리 중 오류가 발생했습니다.";
+          }
+        }
+      }
+
+      if (streamErr) throw new Error(streamErr);
+      if (!itinerary) throw new Error("AI가 일정을 반환하지 않았습니다.");
 
       try {
         sessionStorage.setItem("tripvibe_itinerary", JSON.stringify(itinerary));
@@ -175,6 +222,8 @@ export default function HomePage() {
     } catch (err) {
       setErrorMsg(err instanceof Error ? err.message : "알 수 없는 오류가 발생했습니다.");
       setIsLoading(false);
+      setStreamingActive(false);
+      setLoadingProgress(0);
     }
   };
 
@@ -194,9 +243,21 @@ export default function HomePage() {
               <Sparkles size={16} style={{ color: "var(--accent-gold)" }} />
             </div>
           </div>
-          <div className="text-center">
+          <div className="text-center max-w-xs">
             <p className="font-semibold mb-1 text-sm sm:text-base" style={{ color: "var(--text-primary)" }}>AI가 일정을 생성하고 있어요</p>
-            <p className="text-xs sm:text-sm" style={{ color: "var(--text-muted)" }}>{loadingMsg}</p>
+            <p className="text-xs sm:text-sm mb-3" style={{ color: "var(--text-muted)" }}>{loadingMsg}</p>
+            {/* Progress bar (only when streaming reports real progress) */}
+            {streamingActive && (
+              <div className="w-48 h-1 rounded-full mx-auto overflow-hidden" style={{ backgroundColor: "rgba(255,255,255,0.08)" }}>
+                <div
+                  className="h-full rounded-full transition-all duration-300 ease-out"
+                  style={{
+                    width: `${Math.max(5, Math.min(100, loadingProgress * 100))}%`,
+                    background: "linear-gradient(90deg, var(--accent-gold), var(--accent-coral))",
+                  }}
+                />
+              </div>
+            )}
           </div>
         </div>
       )}
@@ -423,6 +484,27 @@ export default function HomePage() {
                 ))}
               </select>
             </div>
+          </div>
+
+          {/* Row 1.5: Optional start date — improves recs by reflecting season & weekday */}
+          <div className="mb-6">
+            <label className="block text-xs font-medium mb-2" style={{ color: "var(--text-muted)" }}>
+              <Calendar size={11} className="inline mr-1" />
+              출발 날짜 <span className="opacity-60">(선택 — 요일·계절 반영)</span>
+            </label>
+            <input
+              type="date"
+              value={startDate}
+              onChange={e => setStartDate(e.target.value)}
+              min={new Date().toISOString().slice(0, 10)}
+              className="input-field w-full px-4 py-3 rounded-xl border text-sm transition-all cursor-pointer"
+              style={{
+                backgroundColor: "var(--bg-input)",
+                borderColor: "var(--border-faint)",
+                color: startDate ? "var(--text-primary)" : "var(--text-dim)",
+                colorScheme: "dark",
+              }}
+            />
           </div>
 
           {/* Row 2: Travel style tags */}

@@ -1,191 +1,230 @@
 import Groq from "groq-sdk";
-import { NextRequest, NextResponse } from "next/server";
+import { NextRequest } from "next/server";
+import {
+  normalizeItineraryTimes,
+  sanitizeItineraryCoords,
+  buildDateContext,
+  verifyMissingCoordsViaNominatim,
+} from "@/lib/llmHelpers";
+import type { MockItinerary } from "@/data/mockItinerary";
 
 const STYLE_GUIDE: Record<string, string> = {
-  healing:   "조용하고 한적한 힐링 스폿(온천, 카페, 공원 등) 위주로 추천",
-  food:      "현지인이 추천하는 맛집과 카페 위주로 추천",
-  activity:  "체험형 액티비티(서핑, 트레킹, 테마파크 등) 위주로 추천",
-  insta:     "사진이 잘 나오는 인스타 감성 명소(뷰포인트, 감성 카페, 포토스팟) 위주로 추천",
-  culture:   "박물관, 사찰, 유적지 등 문화/역사 명소 위주로 추천",
-  nature:    "자연 경관(산, 바다, 해변, 폭포 등) 위주로 추천",
-  shopping:  "쇼핑 거리, 시장, 백화점, 편집숍 위주로 추천",
-  nightlife: "야경 명소와 바, 클럽, 야시장 등 밤에 즐길 거리 위주로 추천",
+  healing:   "조용하고 한적한 힐링 스폿(온천, 카페, 공원 등)",
+  food:      "현지인이 추천하는 맛집과 카페",
+  activity:  "체험형 액티비티(서핑, 트레킹, 테마파크 등)",
+  insta:     "사진이 잘 나오는 인스타 감성 명소(뷰포인트, 감성 카페, 포토스팟)",
+  culture:   "박물관, 사찰, 유적지 등 문화/역사 명소",
+  nature:    "자연 경관(산, 바다, 해변, 폭포 등)",
+  shopping:  "쇼핑 거리, 시장, 백화점, 편집숍",
+  nightlife: "야경 명소와 바, 클럽, 야시장",
 };
 
-const SYSTEM_PROMPT = `You are an expert travel planner. You MUST respond ONLY with valid JSON. Do not include any markdown formatting, code blocks, or backticks. No explanations before or after the JSON.
+// ── Trimmed system prompt (~30% smaller than before) ──────────
+// Time arithmetic is normalized on the server, so the prompt no longer
+// needs to teach the LLM how to compute `time[i+1]`. Coords are sanity-
+// checked + Nominatim-verified, so we just ask for plausible numbers.
+const SYSTEM_PROMPT = `You are an expert travel planner. Respond with ONE valid JSON object only.
 
-The JSON structure must match this EXACT format:
+JSON shape:
 {
   "destination": "string (Korean)",
   "duration": "string (Korean, e.g. '1박 2일')",
-  "totalEstimate": "string (Korean, estimated total cost per person, e.g. '약 30만원' or '약 25,000엔')",
-  "days": [
-    {
-      "dayLabel": "string (e.g. 'Day 1')",
-      "date": "string (Korean, e.g. '첫째 날')",
-      "items": [
-        {
-          "time": "string (HH:MM format, e.g. '09:00')",
-          "place": "string (Korean place name)",
-          "description": "string (Korean, 1-2 sentences describing the place and tips)",
-          "category": "one of: food | activity | culture | nature | shopping | healing",
-          "duration": "string (Korean, e.g. '1시간 30분')",
-          "cost": "string (estimated cost per person in local currency, e.g. '무료', '약 1,500엔', '약 ₩15,000', '약 €12')",
-          "coords": {
-            "lat": "number (latitude, decimal degrees, e.g. 35.7148)",
-            "lng": "number (longitude, decimal degrees, e.g. 139.7967)"
-          },
-          "transport": {
-            "mode": "string (Korean, e.g. '지하철', '도보', '택시', '버스', '도보 + 지하철')",
-            "duration": "string (Korean, e.g. '10분', '약 25분')",
-            "cost": "string (optional, e.g. '약 200엔', '무료'). Omit field if walking or unknown."
-          }
-        }
-      ]
-    }
-  ]
+  "totalEstimate": "string (Korean per-person estimate, e.g. '약 30만원' or '약 25,000엔')",
+  "days": [{
+    "dayLabel": "Day N (English)",
+    "date": "Korean ordinal (e.g. '첫째 날')",
+    "items": [{
+      "time": "HH:MM (only the first item's time matters; server normalizes the rest)",
+      "place": "specific Korean place name (e.g. '이치란 라멘 도톤보리점', not '라멘집')",
+      "description": "1-2 Korean sentences with a useful tip",
+      "category": "food | activity | culture | nature | shopping | healing",
+      "duration": "Korean (e.g. '1시간 30분')",
+      "cost": "per-person, LOCAL currency (e.g. '무료', '약 1,500엔', '약 ₩15,000', '약 €12')",
+      "coords": { "lat": number, "lng": number },
+      "transport": { "mode": "Korean (지하철|도보|버스|택시|전철)", "duration": "Korean (e.g. '15분')", "cost": "optional, omit if walking or unknown" }
+    }]
+  }]
 }
 
 Rules:
-- All place names, descriptions, and date labels MUST be written in Korean.
-- Each day must have 6-8 items with realistic times from morning to evening.
-- Times must be chronological and realistic (account for travel and meal durations).
-- Categories must be one of the exact values: food, activity, culture, nature, shopping, healing.
-- Descriptions must be helpful, specific, and written naturally in Korean.
-- dayLabel must be in English: "Day 1", "Day 2", etc.
-- date must be in Korean ordinal form: "첫째 날", "둘째 날", "셋째 날", etc.
-- COST: Always include a realistic "cost" field per item using LOCAL currency of the destination (엔 for Japan, € for Europe, ₩ for Korea, $ for US, ฿ for Thailand, etc.). Use "무료" if free.
-- TRANSPORT: The FIRST item of each day must OMIT the "transport" field (it's the starting point). Every other item MUST include "transport" describing how to get from the PREVIOUS place to this place. Use realistic Korean mode names.
-- TRANSPORT DURATION ACCURACY (very important):
-  • "transport.duration" MUST represent the realistic real-world travel time from the IMMEDIATELY PREVIOUS place to this place — not a guess, but based on actual geographic distance and the chosen mode.
-  • Match the mode to the distance: under 800m → "도보" (5-10분), 800m~3km → "도보" or "지하철" (10-20분), 3-10km → "지하철" or "버스" (15-30분), over 10km → "택시" or "전철" with realistic duration.
-  • The next item's "time" MUST equal: previous item's "time" + previous item's "duration" + this item's "transport.duration". Verify chronologically.
-  • If you place a 13:00 item with 1시간 30분 duration, and the next has a 20분 transport, the next item's time must be roughly 14:50.
-  • Do NOT use suspiciously round numbers like always "15분" — vary realistically (예: 8분, 22분, 35분).
-- TOTAL ESTIMATE: Sum entry fees + meals + local transport roughly. Exclude flights and accommodation. Format as Korean estimate per person.
-- COORDS (mandatory for EVERY item): Provide approximate latitude/longitude in decimal degrees for the actual place location. Use your geographic knowledge of well-known landmarks. The values must be plausible real-world coordinates for the destination's region (e.g., for Tokyo, latitudes near 35.6-35.8, longitudes near 139.6-139.9). NEVER return 0,0 or random numbers. If unsure of an exact location, use the coordinates of the nearest well-known landmark within the same neighborhood. Accuracy within ~500m is acceptable.
+- All text fields in Korean (dayLabel stays English).
+- 6-8 items per day. The FIRST item of each day OMITS the transport field; every other item MUST include transport from the previous place.
+- transport mode by distance: <800m 도보, <3km 지하철/도보, <10km 지하철/버스, ≥10km 택시/전철. transport.duration must reflect actual geography (vary the numbers; don't use round 15분 everywhere).
+- coords MUST be real-world lat/lng for that place in the destination's region. Never 0,0 or random.
+- totalEstimate excludes flights and accommodation.
 
-CRITICAL CONSTRAINTS (must follow strictly):
-1. STYLE MATCHING: At LEAST 70% of all places in the entire itinerary must directly match the user's selected travel styles. Pick places that genuinely fit the chosen vibes. Do NOT pad with random tourist spots from unrelated styles.
-2. NO DUPLICATES: Every place name across the ENTIRE itinerary (all days combined) must be UNIQUE. Never repeat the same place, restaurant, cafe, or attraction in different time slots or different days. Each "place" field must appear exactly once.
-3. Each day should have a meaningful flow — group geographically nearby places to minimize travel time, alternate active and relaxing items.
-
-Respond with ONLY the JSON object. Nothing else.`;
+Hard constraints:
+1. STYLE MATCH: ≥70% of all places must directly match the user's selected styles. No filler.
+2. UNIQUE PLACES: every "place" across ALL days appears exactly once.
+3. ROUTE: cluster geographically nearby places within each day.`;
 
 export async function POST(req: NextRequest) {
-  const apiKey = process.env.GROQ_API_KEY;
-  if (!apiKey) {
-    return NextResponse.json({ error: "API key not configured" }, { status: 500 });
-  }
-
-  let destination: string, duration: string, styles: string[];
+  // ── Input parsing ──
+  let destination: string, duration: string, styles: string[], startDate: string;
   try {
     const body = await req.json();
-    destination = body.destination;
-    duration = body.duration;
-    styles = body.styles ?? [];
+    destination = String(body.destination ?? "").trim();
+    duration = String(body.duration ?? "").trim();
+    styles = Array.isArray(body.styles)
+      ? body.styles.filter((s: unknown): s is string => typeof s === "string")
+      : [];
+    startDate = typeof body.startDate === "string" ? body.startDate : "";
     if (!destination || !duration) throw new Error("missing fields");
   } catch {
-    return NextResponse.json({ error: "Invalid request body" }, { status: 400 });
+    return jsonResponse({ error: "Invalid request body" }, 400);
   }
 
-  const styleDetails = styles.length > 0
-    ? styles.map(s => `  • ${s}: ${STYLE_GUIDE[s] ?? "사용자가 선택한 스타일에 맞는 장소"}`).join("\n")
+  const apiKey = process.env.GROQ_API_KEY;
+  if (!apiKey) {
+    return jsonResponse({ error: "서버에 GROQ_API_KEY가 설정되지 않았습니다." }, 500);
+  }
+
+  const styleDetails = styles.length
+    ? styles.map(s => `  • ${s}: ${STYLE_GUIDE[s] ?? "사용자가 선택한 스타일"}`).join("\n")
     : "  • 일반적인 추천";
 
-  const userPrompt = `Create a travel itinerary for the following trip:
-- Destination: ${destination}
-- Duration: ${duration}
-- Travel styles (USER PRIORITY — must heavily bias the itinerary toward these):
-${styleDetails}
+  const dateContext = buildDateContext(startDate, duration);
 
-REQUIREMENTS:
-1. The majority of recommended places must directly reflect the user's selected styles above. If the user picked "맛집", most places should be restaurants/cafes. If they picked "힐링", focus on calm and restorative spots. Do not include irrelevant tourist clichés unless they fit a chosen style.
-2. Every "place" name in the entire itinerary must be UNIQUE — no place may appear twice across any day.
-3. Include a mix of must-see and hidden gems, but only within the chosen styles.
-4. ROUTE OPTIMIZATION: Within each day, cluster places that are geographically close so that transport durations between consecutive items are minimized. Do not bounce across distant neighborhoods. Use specific, well-known place names (e.g. "이치란 라멘 도톤보리점") not generic names ("라멘집") so locations are unambiguous.
-5. TIME CONSISTENCY: For each non-first item, the "time" must be calculated as previous-item.time + previous-item.duration + this-item.transport.duration. Double-check arithmetic before responding.`;
+  const userPrompt = `Destination: ${destination}
+Duration: ${duration}
+Travel styles (USER PRIORITY — drive ≥70% of choices):
+${styleDetails}${dateContext ? "\n" + dateContext : ""}
 
-  try {
-    const groq = new Groq({ apiKey });
-    const completion = await groq.chat.completions.create({
-      model: "llama-3.3-70b-versatile",
-      messages: [
-        { role: "system", content: SYSTEM_PROMPT },
-        { role: "user", content: userPrompt },
-      ],
-      temperature: 0.7,
-      max_tokens: 4096,
-    });
+Pick a mix of must-see and hidden gems within the chosen styles. Use specific, well-known place names so geocoding is unambiguous. Cluster nearby places per day to minimize transport time.`;
 
-    const text = completion.choices[0]?.message?.content?.trim() ?? "";
-    const cleaned = text.replace(/^```(?:json)?\n?/i, "").replace(/\n?```$/i, "").trim();
+  // ── Streaming response (NDJSON: one JSON event per line) ──
+  const encoder = new TextEncoder();
+  const stream = new ReadableStream({
+    async start(controller) {
+      const send = (event: Record<string, unknown>) => {
+        try {
+          controller.enqueue(encoder.encode(JSON.stringify(event) + "\n"));
+        } catch {
+          /* controller might already be closed — ignore */
+        }
+      };
 
-    let itinerary: unknown;
-    try {
-      itinerary = JSON.parse(cleaned);
-    } catch {
-      console.error("[generate] JSON parse failed. Raw:", cleaned.slice(0, 500));
-      return NextResponse.json(
-        { error: "AI 응답 형식이 올바르지 않습니다. 다시 시도해주세요." },
-        { status: 502 }
-      );
-    }
+      try {
+        send({ type: "progress", phase: "thinking", message: `${destination} 일정을 구상 중...`, progress: 0.05 });
 
-    // Validate response shape
-    const it = itinerary as {
-      destination?: unknown;
-      duration?: unknown;
-      days?: unknown;
-    };
-    if (
-      typeof it?.destination !== "string" ||
-      typeof it?.duration !== "string" ||
-      !Array.isArray(it?.days) ||
-      it.days.length === 0
-    ) {
-      console.error("[generate] Invalid itinerary shape:", JSON.stringify(itinerary).slice(0, 300));
-      return NextResponse.json(
-        { error: "AI가 생성한 일정의 구조가 올바르지 않습니다. 다시 시도해주세요." },
-        { status: 502 }
-      );
-    }
+        const groq = new Groq({ apiKey });
+        const completion = await groq.chat.completions.create({
+          model: "llama-3.3-70b-versatile",
+          messages: [
+            { role: "system", content: SYSTEM_PROMPT },
+            { role: "user", content: userPrompt },
+          ],
+          temperature: 0.7,
+          max_tokens: 4096,
+          stream: true,
+          response_format: { type: "json_object" },
+        });
 
-    const validDays = it.days.filter(
-      (d): d is { items: unknown[] } =>
-        typeof d === "object" && d !== null && Array.isArray((d as { items?: unknown }).items)
-    );
-    if (validDays.length === 0) {
-      return NextResponse.json(
-        { error: "AI가 생성한 일정에 유효한 항목이 없습니다. 다시 시도해주세요." },
-        { status: 502 }
-      );
-    }
+        // Accumulate streamed text, detect "Day N" markers to emit progress events
+        let fullText = "";
+        let lastReportedDay = 0;
+        for await (const chunk of completion) {
+          const delta = chunk.choices[0]?.delta?.content ?? "";
+          if (!delta) continue;
+          fullText += delta;
+          const dayMatches = fullText.match(/"dayLabel"\s*:\s*"Day\s*(\d+)/g);
+          const dayCount = dayMatches ? dayMatches.length : 0;
+          if (dayCount > lastReportedDay) {
+            lastReportedDay = dayCount;
+            send({
+              type: "progress",
+              phase: "day",
+              message: `Day ${dayCount} 코스를 채우는 중...`,
+              progress: Math.min(0.85, 0.15 + dayCount * 0.18),
+            });
+          }
+        }
 
-    // Safety net: dedupe identical place names across all days (normalized)
-    const seen = new Set<string>();
-    for (const day of validDays) {
-      day.items = day.items.filter((raw) => {
-        const item = raw as { place?: string };
-        const key = (item?.place ?? "").trim().toLowerCase().replace(/\s+/g, "");
-        if (!key || seen.has(key)) return false;
-        seen.add(key);
-        return true;
-      });
-    }
+        send({ type: "progress", phase: "finalizing", message: "시간과 동선을 정리하는 중...", progress: 0.9 });
 
-    // After dedupe, ensure no day is left empty
-    const nonEmptyDays = validDays.filter(d => d.items.length > 0);
-    if (nonEmptyDays.length === 0) {
-      return NextResponse.json(
-        { error: "AI가 생성한 일정에 유효한 장소가 없습니다. 다시 시도해주세요." },
-        { status: 502 }
-      );
-    }
+        // ── Parse + validate shape ──
+        let itinerary: MockItinerary;
+        try {
+          itinerary = JSON.parse(fullText) as MockItinerary;
+        } catch {
+          send({ type: "error", error: "AI 응답 형식이 올바르지 않습니다. 다시 시도해주세요." });
+          controller.close();
+          return;
+        }
 
-    return NextResponse.json(itinerary);
-  } catch (err) {
-    console.error("[generate] Groq error:", err);
-    return NextResponse.json({ error: "일정 생성에 실패했습니다. 잠시 후 다시 시도해주세요." }, { status: 500 });
-  }
+        if (
+          typeof itinerary?.destination !== "string" ||
+          typeof itinerary?.duration !== "string" ||
+          !Array.isArray(itinerary?.days) ||
+          itinerary.days.length === 0
+        ) {
+          send({ type: "error", error: "AI가 생성한 일정의 구조가 올바르지 않습니다." });
+          controller.close();
+          return;
+        }
+
+        // Drop malformed days
+        itinerary.days = itinerary.days.filter(
+          d => typeof d === "object" && d !== null && Array.isArray(d.items)
+        );
+
+        // Cross-day place dedupe (safety net — prompt already says unique)
+        const seen = new Set<string>();
+        for (const day of itinerary.days) {
+          day.items = day.items.filter(item => {
+            const key = (item?.place ?? "").trim().toLowerCase().replace(/\s+/g, "");
+            if (!key || seen.has(key)) return false;
+            seen.add(key);
+            return true;
+          });
+        }
+        itinerary.days = itinerary.days.filter(d => d.items.length > 0);
+
+        if (itinerary.days.length === 0) {
+          send({ type: "error", error: "AI가 생성한 일정에 유효한 장소가 없습니다." });
+          controller.close();
+          return;
+        }
+
+        // ── Post-process: drop implausible coords + normalize times ──
+        sanitizeItineraryCoords(itinerary);
+        normalizeItineraryTimes(itinerary);
+
+        // Best-effort coord recovery via Nominatim (capped, throttled)
+        send({ type: "progress", phase: "geocoding", message: "장소 좌표를 확인하는 중...", progress: 0.95 });
+        try {
+          await verifyMissingCoordsViaNominatim(itinerary, 6);
+        } catch (err) {
+          console.warn("[generate] nominatim recovery failed:", err);
+        }
+
+        send({ type: "done", data: itinerary });
+        controller.close();
+      } catch (err) {
+        console.error("[generate] failed:", err);
+        const msg = err instanceof Error ? err.message : "알 수 없는 오류";
+        send({ type: "error", error: `일정 생성에 실패했습니다: ${msg}` });
+        try { controller.close(); } catch { /* already closed */ }
+      }
+    },
+
+    cancel() {
+      // Client disconnected — Groq's iterator will end on its own
+    },
+  });
+
+  return new Response(stream, {
+    headers: {
+      "Content-Type": "application/x-ndjson; charset=utf-8",
+      "Cache-Control": "no-cache, no-transform",
+      "X-Accel-Buffering": "no",
+    },
+  });
+}
+
+function jsonResponse(body: unknown, status: number) {
+  return new Response(JSON.stringify(body), {
+    status,
+    headers: { "Content-Type": "application/json" },
+  });
 }
