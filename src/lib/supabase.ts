@@ -18,5 +18,6 @@ export type ItineraryRow = {
   duration: string;
   styles: string[];
   content: object;
+  is_public: boolean;
   created_at: string;
 };

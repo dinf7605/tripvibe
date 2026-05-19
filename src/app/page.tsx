@@ -35,6 +35,31 @@ const DURATIONS = [
 
 const POPULAR_DESTINATIONS = ["도쿄", "오사카", "파리", "방콕", "발리", "뉴욕", "런던", "바르셀로나"];
 
+// ── Loading messages ───────────────────────────────────
+// Generates 4 rotating messages based on destination + selected styles
+function buildLoadingMessages(destination: string, styles: string[]): string[] {
+  const dest = destination.trim() || "그곳";
+
+  // Style-flavored opener (pick whichever style the user emphasized)
+  const styleOpener: string =
+    styles.includes("food")      ? `${dest}의 숨은 맛집을 찾는 중...` :
+    styles.includes("healing")   ? `${dest}의 조용한 쉼터를 찾는 중...` :
+    styles.includes("activity")  ? `${dest}의 짜릿한 액티비티를 모으는 중...` :
+    styles.includes("culture")   ? `${dest}의 문화 명소를 둘러보는 중...` :
+    styles.includes("nature")    ? `${dest}의 자연 경관을 살펴보는 중...` :
+    styles.includes("shopping")  ? `${dest}의 쇼핑 핫스팟을 찾는 중...` :
+    styles.includes("insta")     ? `${dest}의 인스타 명소를 정리하는 중...` :
+    styles.includes("nightlife") ? `${dest}의 밤문화 명소를 살펴보는 중...` :
+                                   `${dest}의 인기 명소를 분석하는 중...`;
+
+  return [
+    styleOpener,
+    `현지인이 추천하는 ${dest} 동선을 짜는 중...`,
+    "이동 시간을 최적화하고 예상 비용을 계산 중...",
+    `${dest} 여행의 마지막 디테일을 채우는 중...`,
+  ];
+}
+
 function seeded(n: number) {
   const x = Math.sin(n + 1) * 10000;
   return x - Math.floor(x);
@@ -65,6 +90,19 @@ export default function HomePage() {
     return () => clearTimeout(t);
   }, [errorMsg]);
 
+  // Rotate loading messages every 1.4s while generating
+  useEffect(() => {
+    if (!isLoading) return;
+    const messages = buildLoadingMessages(destination, selectedStyles);
+    let i = 0;
+    setLoadingMsg(messages[0]);
+    const interval = setInterval(() => {
+      i = (i + 1) % messages.length;
+      setLoadingMsg(messages[i]);
+    }, 1400);
+    return () => clearInterval(interval);
+  }, [isLoading, destination, selectedStyles]);
+
   const filteredSuggestions = destination.length > 0
     ? POPULAR_DESTINATIONS.filter(d => d.includes(destination))
     : POPULAR_DESTINATIONS;
@@ -81,7 +119,7 @@ export default function HomePage() {
     if (!canGenerate || isLoading) return;
     setIsLoading(true);
     setErrorMsg(null);
-    setLoadingMsg(`${destination} · ${duration} 최적 코스 분석 중...`);
+    // loadingMsg is set & rotated by the useEffect tied to isLoading
 
     try {
       const res = await fetch("/api/generate", {
@@ -99,19 +137,27 @@ export default function HomePage() {
 
       try {
         sessionStorage.setItem("tripvibe_itinerary", JSON.stringify(itinerary));
+        sessionStorage.setItem("tripvibe_itinerary_styles", JSON.stringify(selectedStyles));
       } catch (storageErr) {
         console.error("[generate] sessionStorage error:", storageErr);
         throw new Error("일정 데이터를 임시 저장하지 못했습니다. 브라우저 저장 공간을 확인해주세요.");
       }
 
+      // Clear any stale id from a previous trip
+      try { sessionStorage.removeItem("tripvibe_itinerary_id"); } catch { /* ignore */ }
+
       if (user) {
-        const { error: dbError } = await supabase.from("itineraries").insert({
-          destination,
-          duration,
-          styles: selectedStyles,
-          content: itinerary,
-          user_id: user.id,
-        });
+        const { data: inserted, error: dbError } = await supabase
+          .from("itineraries")
+          .insert({
+            destination,
+            duration,
+            styles: selectedStyles,
+            content: itinerary,
+            user_id: user.id,
+          })
+          .select("id")
+          .single();
         if (dbError) {
           console.error("[save itinerary] DB error:", dbError.message);
           try {
@@ -120,6 +166,8 @@ export default function HomePage() {
               "일정은 만들었지만 '내 여행'에 저장하지 못했어요. (네트워크 또는 권한 문제)"
             );
           } catch { /* ignore */ }
+        } else if (inserted?.id) {
+          try { sessionStorage.setItem("tripvibe_itinerary_id", inserted.id); } catch { /* ignore */ }
         }
       }
 
@@ -464,8 +512,14 @@ export default function HomePage() {
       </section>
 
       {/* ── Footer ── */}
-      <footer className="relative z-10 text-center pb-8 text-xs" style={{ color: "var(--text-dim)" }}>
-        © 2025 TripVibe · AI가 만드는 완벽한 여행 경험
+      <footer className="relative z-10 text-center pb-8 text-xs flex flex-col items-center gap-2"
+        style={{ color: "var(--text-dim)" }}>
+        <div>© 2026 TripVibe · AI가 만드는 완벽한 여행 경험</div>
+        <div className="flex items-center gap-3">
+          <Link href="/privacy" className="transition-colors hover:underline">개인정보 처리방침</Link>
+          <span style={{ opacity: 0.4 }}>·</span>
+          <Link href="/terms" className="transition-colors hover:underline">이용약관</Link>
+        </div>
       </footer>
     </main>
   );

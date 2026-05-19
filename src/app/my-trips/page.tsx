@@ -5,6 +5,7 @@ import { useRouter } from "next/navigation";
 import { Compass, ArrowLeft, History, AlertCircle, Plus, LogIn, CheckCircle, X } from "lucide-react";
 import TripCard from "@/components/TripCard";
 import ThemeToggle from "@/components/ThemeToggle";
+import EmptyTripsIllustration from "@/components/EmptyTripsIllustration";
 import { supabase } from "@/lib/supabase";
 import { useAuth } from "@/context/AuthContext";
 import type { ItineraryRow } from "@/lib/supabase";
@@ -57,7 +58,7 @@ export default function MyTripsPage() {
   const handleTripClick = async (id: string) => {
     const { data, error } = await supabase
       .from("itineraries")
-      .select("content")
+      .select("content, styles")
       .eq("id", id)
       .single();
 
@@ -69,6 +70,11 @@ export default function MyTripsPage() {
 
     try {
       sessionStorage.setItem("tripvibe_itinerary", JSON.stringify(data.content));
+      sessionStorage.setItem("tripvibe_itinerary_id", id);
+      sessionStorage.setItem(
+        "tripvibe_itinerary_styles",
+        JSON.stringify(Array.isArray(data.styles) ? data.styles : [])
+      );
     } catch (storageErr) {
       console.error("[my-trips] sessionStorage error:", storageErr);
       showToast("브라우저 저장 공간이 부족합니다.", "error");
@@ -217,14 +223,31 @@ export default function MyTripsPage() {
             <p className="text-sm">{error}</p>
           </div>
         ) : trips.length === 0 ? (
-          <div className="flex flex-col items-center justify-center py-24 gap-4 text-center">
-            <div className="text-4xl">🗺️</div>
-            <p className="font-medium" style={{ color: "var(--text-primary)" }}>아직 저장된 일정이 없어요</p>
-            <p className="text-sm" style={{ color: "var(--text-muted)" }}>메인 페이지에서 첫 번째 여행 일정을 생성해보세요!</p>
-            <button onClick={() => router.push("/")}
-              className="mt-2 px-5 py-2.5 rounded-xl text-sm font-medium transition-all"
-              style={{ background: "linear-gradient(135deg, var(--accent-gold), var(--accent-gold-lt))", color: "var(--text-onAccent)" }}>
-              일정 생성하러 가기
+          <div className="flex flex-col items-center justify-center py-16 sm:py-20 gap-5 text-center animate-fade-in">
+            <EmptyTripsIllustration />
+            <div className="space-y-1.5">
+              <p className="font-semibold text-base" style={{ color: "var(--text-primary)" }}>
+                아직 저장된 여행이 없어요
+              </p>
+              <p className="text-sm max-w-xs leading-relaxed" style={{ color: "var(--text-muted)" }}>
+                첫 번째 일정을 만들면 여기에 모입니다.
+                <br />
+                AI가 단 몇 초 만에 코스를 짜드려요.
+              </p>
+            </div>
+            <button
+              onClick={() => router.push("/")}
+              className="mt-1 inline-flex items-center gap-1.5 px-5 py-2.5 rounded-xl text-sm font-semibold transition-all"
+              style={{
+                background: "linear-gradient(135deg, var(--accent-gold), var(--accent-gold-lt))",
+                color: "var(--text-onAccent)",
+                boxShadow: "0 8px 20px rgba(240,180,41,0.25)",
+              }}
+              onMouseEnter={e => (e.currentTarget.style.transform = "translateY(-1px)")}
+              onMouseLeave={e => (e.currentTarget.style.transform = "translateY(0)")}
+            >
+              <Plus size={15} />
+              새 일정 만들기
             </button>
           </div>
         ) : (

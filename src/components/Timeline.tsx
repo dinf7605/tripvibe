@@ -1,12 +1,28 @@
 "use client";
 
 import { useState } from "react";
-import { Clock, MapPin, UtensilsCrossed, Zap, Landmark, Trees, ShoppingBag, Heart, ExternalLink, Wallet, Navigation, Train, Footprints, Bus, Car, Map, Route } from "lucide-react";
+import { Clock, MapPin, UtensilsCrossed, Zap, Landmark, Trees, ShoppingBag, Heart, ExternalLink, Wallet, Navigation, Train, Footprints, Bus, Car, Map, Route, Plus, RefreshCw } from "lucide-react";
 import type { MockItinerary, ItineraryItem } from "@/data/mockItinerary";
 import MapView from "./MapView";
 import CurrencyWidget from "./CurrencyWidget";
+import SortableEditableCard from "./SortableEditableCard";
 import { optimizeRoute } from "@/lib/routeOptimizer";
 import type { OptimizeResult } from "@/lib/routeOptimizer";
+import {
+  DndContext,
+  closestCenter,
+  KeyboardSensor,
+  PointerSensor,
+  useSensor,
+  useSensors,
+  type DragEndEvent,
+} from "@dnd-kit/core";
+import {
+  arrayMove,
+  SortableContext,
+  sortableKeyboardCoordinates,
+  verticalListSortingStrategy,
+} from "@dnd-kit/sortable";
 
 function transportIcon(mode: string) {
   const m = mode.toLowerCase();
@@ -29,9 +45,22 @@ const CATEGORY_CONFIG: Record<
   healing:  { icon: <Heart size={13} />,           color: "#4ecdc4", bg: "rgba(78,205,196,0.15)", label: "힐링" },
 };
 
-type Props = { itinerary: MockItinerary };
+type Props = {
+  itinerary: MockItinerary;
+  editMode?: boolean;
+  onItineraryChange?: (next: MockItinerary) => void;
+  onRegenerateItem?: (dayIdx: number, itemIdx: number) => void;
+  /** "day-idx" string identifying the currently-regenerating card, if any */
+  regeneratingKey?: string | null;
+};
 
-export default function Timeline({ itinerary }: Props) {
+export default function Timeline({
+  itinerary,
+  editMode = false,
+  onItineraryChange,
+  onRegenerateItem,
+  regeneratingKey,
+}: Props) {
   const [activeDay, setActiveDay] = useState(0);
   const [showMap, setShowMap] = useState(false);
   const [activeItemIdx, setActiveItemIdx] = useState<number | null>(null);
@@ -39,6 +68,11 @@ export default function Timeline({ itinerary }: Props) {
   const [activeOptimized, setActiveOptimized] = useState<Set<number>>(new Set());
   const [optimizing, setOptimizing] = useState(false);
   const [optimizeError, setOptimizeError] = useState<string | null>(null);
+
+  const sensors = useSensors(
+    useSensor(PointerSensor, { activationConstraint: { distance: 5 } }),
+    useSensor(KeyboardSensor, { coordinateGetter: sortableKeyboardCoordinates })
+  );
 
   const safeActiveDay = Math.min(Math.max(0, activeDay), Math.max(0, itinerary.days.length - 1));
   const currentDay = itinerary.days[safeActiveDay];
@@ -59,6 +93,75 @@ export default function Timeline({ itinerary }: Props) {
     setActiveDay(idx);
     setActiveItemIdx(null);
     setOptimizeError(null);
+  };
+
+  // ── Edit handlers ─────────────────────────────────────
+  const mutateCurrentDay = (mutator: (items: ItineraryItem[]) => ItineraryItem[]) => {
+    if (!onItineraryChange) return;
+    const nextDays = itinerary.days.map((d, i) => {
+      if (i !== safeActiveDay) return d;
+      return { ...d, items: mutator(Array.isArray(d.items) ? d.items : []) };
+    });
+    onItineraryChange({ ...itinerary, days: nextDays });
+  };
+
+  // After reorder/delete the predecessor of each item changes,
+  // making transport info meaningless. Strip it so the user can re-optimize.
+  const stripAllTransport = (items: ItineraryItem[]) =>
+    items.map(it => ({ ...it, transport: undefined }));
+
+  const handleItemEdit = (idx: number, patch: Partial<ItineraryItem>) => {
+    mutateCurrentDay(items =>
+      items.map((it, i) => {
+        if (i !== idx) return it;
+        const next = { ...it, ...patch };
+        // If place name changed substantially, stored coords/transport may be wrong
+        if (patch.place !== undefined && patch.place !== it.place) {
+          next.coords = undefined;
+        }
+        return next;
+      })
+    );
+  };
+
+  const handleItemDelete = (idx: number) => {
+    if (idx < 0) return;
+    mutateCurrentDay(items => {
+      if (idx >= items.length) return items;
+      return stripAllTransport(items.filter((_, i) => i !== idx));
+    });
+  };
+
+  const handleAddItem = () => {
+    const last = currentItems[currentItems.length - 1];
+    const newTime = (() => {
+      if (!last || !/^\d{1,2}:\d{2}$/.test(last.time)) return "09:00";
+      const [h, m] = last.time.split(":").map(Number);
+      if (!Number.isFinite(h) || !Number.isFinite(m)) return "09:00";
+      const nextH = Math.min(23, h + 1);
+      return `${String(nextH).padStart(2, "0")}:${String(m).padStart(2, "0")}`;
+    })();
+    const newItem: ItineraryItem = {
+      time: newTime,
+      place: "",
+      description: "",
+      category: "activity",
+      duration: "1시간",
+    };
+    mutateCurrentDay(items => [...items, newItem]);
+  };
+
+  const handleDragEnd = (event: DragEndEvent) => {
+    const { active, over } = event;
+    if (!over || active.id === over.id) return;
+    const oldIdx = Number(active.id);
+    const newIdx = Number(over.id);
+    if (!Number.isFinite(oldIdx) || !Number.isFinite(newIdx)) return;
+    if (oldIdx < 0 || newIdx < 0) return;
+    mutateCurrentDay(items => {
+      if (oldIdx >= items.length || newIdx >= items.length) return items;
+      return stripAllTransport(arrayMove(items, oldIdx, newIdx));
+    });
   };
 
   const handleOptimize = async () => {
@@ -150,37 +253,41 @@ export default function Timeline({ itinerary }: Props) {
             <span className="block text-xs mt-0.5" style={{ opacity: 0.7 }}>{day.date}</span>
           </button>
         ))}
-        <button
-          onClick={() => setShowMap(v => !v)}
-          className="flex flex-col items-center justify-center px-3 py-2 rounded-lg text-xs font-medium transition-all"
-          style={{
-            backgroundColor: showMap ? "rgba(240,180,41,0.15)" : "transparent",
-            color: showMap ? "var(--accent-gold)" : "var(--text-muted)",
-            borderBottom: showMap ? "2px solid var(--accent-gold)" : "2px solid transparent",
-            minWidth: 56,
-          }}
-        >
-          <Map size={15} />
-          <span className="mt-0.5">지도</span>
-        </button>
-        <button
-          onClick={handleOptimize}
-          disabled={optimizing}
-          className="flex flex-col items-center justify-center px-3 py-2 rounded-lg text-xs font-medium transition-all"
-          style={{
-            backgroundColor: isCurrentOptimized ? "rgba(34,197,94,0.15)" : "transparent",
-            color: isCurrentOptimized ? "#22c55e" : optimizing ? "var(--accent-gold)" : "var(--text-muted)",
-            borderBottom: isCurrentOptimized ? "2px solid #22c55e" : "2px solid transparent",
-            minWidth: 56,
-            opacity: optimizing ? 0.8 : 1,
-          }}
-        >
-          {optimizing
-            ? <div className="w-4 h-4 rounded-full border-2 animate-spin" style={{ borderColor: "var(--accent-gold)", borderTopColor: "transparent" }} />
-            : <Route size={15} />
-          }
-          <span className="mt-0.5">{isCurrentOptimized ? "원래순서" : "최적화"}</span>
-        </button>
+        {!editMode && (
+          <>
+            <button
+              onClick={() => setShowMap(v => !v)}
+              className="flex flex-col items-center justify-center px-3 py-2 rounded-lg text-xs font-medium transition-all"
+              style={{
+                backgroundColor: showMap ? "rgba(240,180,41,0.15)" : "transparent",
+                color: showMap ? "var(--accent-gold)" : "var(--text-muted)",
+                borderBottom: showMap ? "2px solid var(--accent-gold)" : "2px solid transparent",
+                minWidth: 56,
+              }}
+            >
+              <Map size={15} />
+              <span className="mt-0.5">지도</span>
+            </button>
+            <button
+              onClick={handleOptimize}
+              disabled={optimizing}
+              className="flex flex-col items-center justify-center px-3 py-2 rounded-lg text-xs font-medium transition-all"
+              style={{
+                backgroundColor: isCurrentOptimized ? "rgba(34,197,94,0.15)" : "transparent",
+                color: isCurrentOptimized ? "#22c55e" : optimizing ? "var(--accent-gold)" : "var(--text-muted)",
+                borderBottom: isCurrentOptimized ? "2px solid #22c55e" : "2px solid transparent",
+                minWidth: 56,
+                opacity: optimizing ? 0.8 : 1,
+              }}
+            >
+              {optimizing
+                ? <div className="w-4 h-4 rounded-full border-2 animate-spin" style={{ borderColor: "var(--accent-gold)", borderTopColor: "transparent" }} />
+                : <Route size={15} />
+              }
+              <span className="mt-0.5">{isCurrentOptimized ? "원래순서" : "최적화"}</span>
+            </button>
+          </>
+        )}
       </div>
 
       {/* ── Optimize status / error ── */}
@@ -201,7 +308,7 @@ export default function Timeline({ itinerary }: Props) {
       )}
 
       {/* ── Map view ── */}
-      {showMap && (
+      {showMap && !editMode && (
         <div className="mb-6 animate-fade-in">
           <MapView
             key={`${safeActiveDay}-${isCurrentOptimized ? "opt" : "orig"}`}
@@ -212,7 +319,59 @@ export default function Timeline({ itinerary }: Props) {
         </div>
       )}
 
-      {/* ── Timeline ── */}
+      {/* ── Edit mode: sortable cards ── */}
+      {editMode ? (
+        <div className="animate-fade-in">
+          <DndContext sensors={sensors} collisionDetection={closestCenter} onDragEnd={handleDragEnd}>
+            <SortableContext
+              items={currentItems.map((_, i) => String(i))}
+              strategy={verticalListSortingStrategy}
+            >
+              <div>
+                {currentItems.length === 0 ? (
+                  <div className="text-center py-10 text-sm" style={{ color: "var(--text-muted)" }}>
+                    이 날짜에는 장소가 없습니다. 아래 버튼으로 추가해주세요.
+                  </div>
+                ) : (
+                  currentItems.map((item, idx) => (
+                    <SortableEditableCard
+                      key={idx}
+                      id={String(idx)}
+                      index={idx}
+                      item={item}
+                      onChange={patch => handleItemEdit(idx, patch)}
+                      onDelete={() => handleItemDelete(idx)}
+                    />
+                  ))
+                )}
+              </div>
+            </SortableContext>
+          </DndContext>
+          <button
+            onClick={handleAddItem}
+            className="w-full flex items-center justify-center gap-2 py-3 rounded-xl border-2 border-dashed text-sm font-medium transition-all"
+            style={{
+              borderColor: "var(--border-faint)",
+              color: "var(--text-muted)",
+              backgroundColor: "transparent",
+            }}
+            onMouseEnter={e => {
+              e.currentTarget.style.borderColor = "var(--accent-gold)";
+              e.currentTarget.style.color = "var(--accent-gold)";
+              e.currentTarget.style.backgroundColor = "rgba(240,180,41,0.04)";
+            }}
+            onMouseLeave={e => {
+              e.currentTarget.style.borderColor = "var(--border-faint)";
+              e.currentTarget.style.color = "var(--text-muted)";
+              e.currentTarget.style.backgroundColor = "transparent";
+            }}
+          >
+            <Plus size={15} />
+            장소 추가
+          </button>
+        </div>
+      ) : (
+      /* ── Timeline (view mode) ── */
       <div className="relative">
         <div className="absolute left-[24px] sm:left-[28px] top-3 bottom-3 w-px" style={{ backgroundColor: "var(--border-faint)" }} />
 
@@ -265,15 +424,18 @@ export default function Timeline({ itinerary }: Props) {
 
                   {/* Card */}
                   <div
-                    className="flex-1 mb-3 sm:mb-4 rounded-xl border p-3 sm:p-4 transition-all duration-200 cursor-pointer"
+                    className="relative flex-1 mb-3 sm:mb-4 rounded-xl border p-3 sm:p-4 transition-all duration-200 cursor-pointer"
                     style={{
                       backgroundColor: "var(--bg-card)",
                       borderColor: activeItemIdx === idx ? cat.color : "var(--border-faint)",
                       boxShadow: activeItemIdx === idx ? `0 4px 24px ${cat.color}30` : "none",
+                      opacity: regeneratingKey === `${safeActiveDay}-${idx}` ? 0.55 : 1,
+                      pointerEvents: regeneratingKey === `${safeActiveDay}-${idx}` ? "none" : "auto",
                     }}
                     onClick={() => item.coords && handleItemClick(idx)}
                     title={item.coords ? "지도에서 이 장소 보기" : ""}
                     onMouseEnter={e => {
+                      if (regeneratingKey === `${safeActiveDay}-${idx}`) return;
                       (e.currentTarget as HTMLDivElement).style.borderColor = cat.color + "50";
                       (e.currentTarget as HTMLDivElement).style.boxShadow = `0 4px 24px ${cat.color}18`;
                       (e.currentTarget as HTMLDivElement).style.transform = "translateX(4px)";
@@ -284,6 +446,25 @@ export default function Timeline({ itinerary }: Props) {
                       (e.currentTarget as HTMLDivElement).style.transform = "translateX(0)";
                     }}
                   >
+                    {/* Regenerating overlay spinner */}
+                    {regeneratingKey === `${safeActiveDay}-${idx}` && (
+                      <div className="absolute inset-0 flex items-center justify-center rounded-xl z-10"
+                        style={{ backgroundColor: "rgba(0,0,0,0.04)", pointerEvents: "auto" }}>
+                        <div className="flex items-center gap-2 px-3 py-1.5 rounded-full"
+                          style={{
+                            backgroundColor: "var(--bg-card)",
+                            border: "1px solid var(--border-faint)",
+                            boxShadow: "0 4px 16px rgba(0,0,0,0.18)",
+                          }}>
+                          <div className="w-3.5 h-3.5 rounded-full border-2 animate-spin"
+                            style={{ borderColor: "var(--accent-gold)", borderTopColor: "transparent" }} />
+                          <span className="text-xs font-medium" style={{ color: "var(--text-primary)" }}>
+                            새로운 장소 찾는 중...
+                          </span>
+                        </div>
+                      </div>
+                    )}
+
                     {/* Top row */}
                     <div className="flex items-start justify-between gap-2 mb-2">
                       <div className="flex items-center gap-1.5 sm:gap-2 flex-wrap">
@@ -307,7 +488,34 @@ export default function Timeline({ itinerary }: Props) {
                           </span>
                         )}
                       </div>
-                      <span className="text-xs shrink-0" style={{ color: "var(--text-dim)" }}>{item.duration}</span>
+                      <div className="flex items-center gap-1.5 shrink-0">
+                        <span className="text-xs" style={{ color: "var(--text-dim)" }}>{item.duration}</span>
+                        {onRegenerateItem && (
+                          <button
+                            onClick={e => {
+                              e.stopPropagation();
+                              onRegenerateItem(safeActiveDay, idx);
+                            }}
+                            className="ml-0.5 p-1.5 rounded-md transition-all"
+                            style={{
+                              color: "var(--text-dim)",
+                              backgroundColor: "transparent",
+                            }}
+                            onMouseEnter={e => {
+                              e.currentTarget.style.color = "var(--accent-gold)";
+                              e.currentTarget.style.backgroundColor = "rgba(240,180,41,0.1)";
+                            }}
+                            onMouseLeave={e => {
+                              e.currentTarget.style.color = "var(--text-dim)";
+                              e.currentTarget.style.backgroundColor = "transparent";
+                            }}
+                            title="이 장소만 다른 곳으로 다시 추천받기"
+                            aria-label="이 장소 다시 추천"
+                          >
+                            <RefreshCw size={12} />
+                          </button>
+                        )}
+                      </div>
                     </div>
 
                     {/* Place name — Google Maps link */}
@@ -336,6 +544,7 @@ export default function Timeline({ itinerary }: Props) {
           })}
         </div>
       </div>
+      )}
     </div>
   );
 }

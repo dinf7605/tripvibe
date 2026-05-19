@@ -2,20 +2,32 @@
 
 import { useState } from "react";
 import { useRouter } from "next/navigation";
+import Link from "next/link";
 import { Compass, Mail, Lock, Eye, EyeOff, AlertCircle, CheckCircle } from "lucide-react";
 import { supabase } from "@/lib/supabase";
 
-type Mode = "login" | "signup";
+type Mode = "login" | "signup" | "forgot";
 
 export default function AuthPage() {
   const router = useRouter();
   const [mode, setMode] = useState<Mode>("login");
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
+  const [passwordConfirm, setPasswordConfirm] = useState("");
   const [showPw, setShowPw] = useState(false);
+  const [showPwConfirm, setShowPwConfirm] = useState(false);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [success, setSuccess] = useState<string | null>(null);
+
+  const switchMode = (m: Mode) => {
+    setMode(m);
+    setError(null);
+    setSuccess(null);
+    setPasswordConfirm("");
+    // Forgot mode doesn't use a password — clear it to avoid stale value
+    if (m === "forgot") setPassword("");
+  };
 
   const friendlyAuthError = (rawMsg: string): string => {
     const m = rawMsg.toLowerCase();
@@ -44,6 +56,19 @@ export default function AuthPage() {
     e.preventDefault();
     setError(null);
     setSuccess(null);
+
+    // Client-side validation for signup
+    if (mode === "signup") {
+      if (password.length < 6) {
+        setError("비밀번호는 6자 이상이어야 합니다.");
+        return;
+      }
+      if (password !== passwordConfirm) {
+        setError("비밀번호가 일치하지 않습니다. 다시 확인해주세요.");
+        return;
+      }
+    }
+
     setLoading(true);
 
     try {
@@ -52,11 +77,21 @@ export default function AuthPage() {
         if (error) {
           setError(friendlyAuthError(error.message));
         } else if (data.session) {
-          // Email confirmation is disabled; user is already logged in
           router.push("/");
         } else {
-          setSuccess("인증 메일을 발송했습니다. 받은편지함을 확인하고 링크를 클릭한 후 로그인하세요.");
-          setMode("login");
+          // Redirect to the dedicated verification info page (with resend button)
+          router.push(`/auth/verify?email=${encodeURIComponent(email)}`);
+        }
+      } else if (mode === "forgot") {
+        const redirectTo =
+          typeof window !== "undefined" ? `${window.location.origin}/auth/reset` : undefined;
+        const { error } = await supabase.auth.resetPasswordForEmail(email, { redirectTo });
+        if (error) {
+          setError(friendlyAuthError(error.message));
+        } else {
+          setSuccess(
+            "비밀번호 재설정 이메일을 발송했습니다. 받은편지함에서 링크를 클릭해 새 비밀번호를 설정하세요."
+          );
         }
       } else {
         const { error } = await supabase.auth.signInWithPassword({ email, password });
@@ -103,7 +138,11 @@ export default function AuthPage() {
             }}>TripVibe</span>
           </div>
           <p className="text-sm text-center" style={{ color: "var(--text-muted)" }}>
-            {mode === "login" ? "계정에 로그인하여 여행 기록을 관리하세요" : "가입하고 나만의 여행 일정을 저장하세요"}
+            {mode === "login"
+              ? "계정에 로그인하여 여행 기록을 관리하세요"
+              : mode === "signup"
+              ? "가입하고 나만의 여행 일정을 저장하세요"
+              : "가입한 이메일을 입력하면 재설정 링크를 보내드려요"}
           </p>
         </div>
 
@@ -116,7 +155,7 @@ export default function AuthPage() {
           {/* Tab */}
           <div className="flex gap-1 mb-6 p-1 rounded-xl" style={{ backgroundColor: "var(--bg-mid)" }}>
             {(["login", "signup"] as Mode[]).map(m => (
-              <button key={m} onClick={() => { setMode(m); setError(null); setSuccess(null); }}
+              <button key={m} onClick={() => switchMode(m)}
                 className="flex-1 py-2 rounded-lg text-sm font-medium transition-all"
                 style={{
                   backgroundColor: mode === m ? "var(--bg-card)" : "transparent",
@@ -146,28 +185,89 @@ export default function AuthPage() {
               </div>
             </div>
 
-            {/* Password */}
-            <div>
-              <label className="block text-xs font-medium mb-1.5" style={{ color: "var(--text-muted)" }}>
-                비밀번호
-              </label>
-              <div className="relative">
-                <Lock size={14} className="absolute left-3 top-1/2 -translate-y-1/2 pointer-events-none"
-                  style={{ color: "var(--text-dim)" }} />
-                <input
-                  type={showPw ? "text" : "password"} value={password}
-                  onChange={e => setPassword(e.target.value)}
-                  required placeholder={mode === "signup" ? "6자 이상 입력" : "비밀번호 입력"}
-                  minLength={6}
-                  className="input-field w-full pl-9 pr-10 py-2.5 rounded-xl border text-sm"
-                  style={{ backgroundColor: "var(--bg-input)", borderColor: "var(--border-faint)", color: "var(--text-primary)" }}
-                />
-                <button type="button" onClick={() => setShowPw(v => !v)}
-                  className="absolute right-3 top-1/2 -translate-y-1/2 transition-opacity hover:opacity-100 opacity-50">
-                  {showPw ? <EyeOff size={14} style={{ color: "var(--text-muted)" }} /> : <Eye size={14} style={{ color: "var(--text-muted)" }} />}
-                </button>
+            {/* Password (hidden in forgot mode) */}
+            {mode !== "forgot" && (
+              <div>
+                <div className="flex items-center justify-between mb-1.5">
+                  <label className="block text-xs font-medium" style={{ color: "var(--text-muted)" }}>
+                    비밀번호
+                  </label>
+                  {mode === "login" && (
+                    <button
+                      type="button"
+                      onClick={() => switchMode("forgot")}
+                      className="text-xs transition-colors"
+                      style={{ color: "var(--accent-gold)" }}
+                      onMouseEnter={e => (e.currentTarget.style.textDecoration = "underline")}
+                      onMouseLeave={e => (e.currentTarget.style.textDecoration = "none")}
+                    >
+                      비밀번호 잊으셨나요?
+                    </button>
+                  )}
+                </div>
+                <div className="relative">
+                  <Lock size={14} className="absolute left-3 top-1/2 -translate-y-1/2 pointer-events-none"
+                    style={{ color: "var(--text-dim)" }} />
+                  <input
+                    type={showPw ? "text" : "password"} value={password}
+                    onChange={e => setPassword(e.target.value)}
+                    required placeholder={mode === "signup" ? "6자 이상 입력" : "비밀번호 입력"}
+                    minLength={6}
+                    className="input-field w-full pl-9 pr-10 py-2.5 rounded-xl border text-sm"
+                    style={{ backgroundColor: "var(--bg-input)", borderColor: "var(--border-faint)", color: "var(--text-primary)" }}
+                  />
+                  <button type="button" onClick={() => setShowPw(v => !v)}
+                    className="absolute right-3 top-1/2 -translate-y-1/2 transition-opacity hover:opacity-100 opacity-50">
+                    {showPw ? <EyeOff size={14} style={{ color: "var(--text-muted)" }} /> : <Eye size={14} style={{ color: "var(--text-muted)" }} />}
+                  </button>
+                </div>
               </div>
-            </div>
+            )}
+
+            {/* Password confirm (signup only) */}
+            {mode === "signup" && (
+              <div>
+                <label className="block text-xs font-medium mb-1.5" style={{ color: "var(--text-muted)" }}>
+                  비밀번호 확인
+                </label>
+                <div className="relative">
+                  <Lock size={14} className="absolute left-3 top-1/2 -translate-y-1/2 pointer-events-none"
+                    style={{ color: "var(--text-dim)" }} />
+                  <input
+                    type={showPwConfirm ? "text" : "password"} value={passwordConfirm}
+                    onChange={e => setPasswordConfirm(e.target.value)}
+                    required placeholder="비밀번호 한 번 더 입력"
+                    minLength={6}
+                    className="input-field w-full pl-9 pr-10 py-2.5 rounded-xl border text-sm"
+                    style={{
+                      backgroundColor: "var(--bg-input)",
+                      borderColor:
+                        passwordConfirm.length > 0 && password !== passwordConfirm
+                          ? "rgba(255,107,107,0.5)"
+                          : passwordConfirm.length > 0 && password === passwordConfirm
+                          ? "rgba(34,197,94,0.5)"
+                          : "var(--border-faint)",
+                      color: "var(--text-primary)",
+                    }}
+                  />
+                  <button type="button" onClick={() => setShowPwConfirm(v => !v)}
+                    className="absolute right-3 top-1/2 -translate-y-1/2 transition-opacity hover:opacity-100 opacity-50">
+                    {showPwConfirm ? <EyeOff size={14} style={{ color: "var(--text-muted)" }} /> : <Eye size={14} style={{ color: "var(--text-muted)" }} />}
+                  </button>
+                </div>
+                {/* Mismatch hint */}
+                {passwordConfirm.length > 0 && password !== passwordConfirm && (
+                  <p className="text-[11px] mt-1.5 ml-1" style={{ color: "#ff6b6b" }}>
+                    비밀번호가 일치하지 않습니다.
+                  </p>
+                )}
+                {passwordConfirm.length > 0 && password === passwordConfirm && password.length >= 6 && (
+                  <p className="text-[11px] mt-1.5 ml-1" style={{ color: "#22c55e" }}>
+                    ✓ 비밀번호가 일치합니다
+                  </p>
+                )}
+              </div>
+            )}
 
             {/* Error / Success */}
             {error && (
@@ -192,8 +292,28 @@ export default function AuthPage() {
                 opacity: loading ? 0.7 : 1,
                 cursor: loading ? "not-allowed" : "pointer",
               }}>
-              {loading ? "처리 중..." : mode === "login" ? "로그인" : "회원가입"}
+              {loading
+                ? "처리 중..."
+                : mode === "login"
+                ? "로그인"
+                : mode === "signup"
+                ? "회원가입"
+                : "재설정 이메일 보내기"}
             </button>
+
+            {/* Back to login link for forgot mode */}
+            {mode === "forgot" && (
+              <button
+                type="button"
+                onClick={() => switchMode("login")}
+                className="w-full text-center text-xs transition-colors"
+                style={{ color: "var(--text-muted)" }}
+                onMouseEnter={e => (e.currentTarget.style.color = "var(--text-primary)")}
+                onMouseLeave={e => (e.currentTarget.style.color = "var(--text-muted)")}
+              >
+                ← 로그인으로 돌아가기
+              </button>
+            )}
           </form>
         </div>
 
@@ -204,6 +324,12 @@ export default function AuthPage() {
           onMouseLeave={e => (e.currentTarget.style.color = "var(--text-dim)")}>
           ← 홈으로 돌아가기
         </button>
+
+        <div className="mt-4 flex items-center justify-center gap-3 text-[11px]" style={{ color: "var(--text-dim)" }}>
+          <Link href="/privacy" className="transition-colors hover:underline">개인정보 처리방침</Link>
+          <span style={{ opacity: 0.4 }}>·</span>
+          <Link href="/terms" className="transition-colors hover:underline">이용약관</Link>
+        </div>
       </div>
     </main>
   );
