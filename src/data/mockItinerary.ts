@@ -4,6 +4,8 @@ export type Transport = {
   cost?: string;
 };
 
+export type Coords = { lat: number; lng: number };
+
 export type ItineraryItem = {
   time: string;
   place: string;
@@ -12,6 +14,7 @@ export type ItineraryItem = {
   duration: string;
   cost?: string;
   transport?: Transport;
+  coords?: Coords;
 };
 
 export type DayPlan = {

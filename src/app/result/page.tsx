@@ -6,18 +6,22 @@ import { Compass, ArrowLeft, Download, Share2, AlertCircle, CheckCircle, X } fro
 import Timeline from "@/components/Timeline";
 import SkeletonTimeline from "@/components/SkeletonTimeline";
 import ThemeToggle from "@/components/ThemeToggle";
+import WeatherWidget from "@/components/WeatherWidget";
 import type { MockItinerary } from "@/data/mockItinerary";
 
 function isValidItinerary(x: unknown): x is MockItinerary {
   if (typeof x !== "object" || x === null) return false;
   const it = x as Partial<MockItinerary>;
-  if (typeof it.destination !== "string" || typeof it.duration !== "string") return false;
+  if (typeof it.destination !== "string" || it.destination.length === 0) return false;
+  if (typeof it.duration !== "string" || it.duration.length === 0) return false;
   if (!Array.isArray(it.days) || it.days.length === 0) return false;
+  let hasAnyItem = false;
   for (const day of it.days) {
     if (typeof day !== "object" || day === null) return false;
     if (!Array.isArray(day.items)) return false;
+    if (day.items.length > 0) hasAnyItem = true;
   }
-  return true;
+  return hasAnyItem;
 }
 
 function itineraryToText(it: MockItinerary): string {
@@ -253,7 +257,13 @@ export default function ResultPage() {
         ) : !itinerary ? (
           <SkeletonTimeline />
         ) : (
-          <div className="animate-fade-in">
+          <div className="animate-fade-in w-full max-w-2xl mx-auto">
+            <div className="mb-5">
+              <p className="text-xs font-medium mb-2" style={{ color: "var(--text-muted)" }}>
+                🌤 {itinerary.destination} 현재 날씨
+              </p>
+              <WeatherWidget destination={itinerary.destination} />
+            </div>
             <Timeline itinerary={itinerary} />
           </div>
         )}

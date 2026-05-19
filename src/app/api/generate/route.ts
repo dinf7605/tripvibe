@@ -31,6 +31,10 @@ The JSON structure must match this EXACT format:
           "category": "one of: food | activity | culture | nature | shopping | healing",
           "duration": "string (Korean, e.g. '1시간 30분')",
           "cost": "string (estimated cost per person in local currency, e.g. '무료', '약 1,500엔', '약 ₩15,000', '약 €12')",
+          "coords": {
+            "lat": "number (latitude, decimal degrees, e.g. 35.7148)",
+            "lng": "number (longitude, decimal degrees, e.g. 139.7967)"
+          },
           "transport": {
             "mode": "string (Korean, e.g. '지하철', '도보', '택시', '버스', '도보 + 지하철')",
             "duration": "string (Korean, e.g. '10분', '약 25분')",
@@ -59,6 +63,7 @@ Rules:
   • If you place a 13:00 item with 1시간 30분 duration, and the next has a 20분 transport, the next item's time must be roughly 14:50.
   • Do NOT use suspiciously round numbers like always "15분" — vary realistically (예: 8분, 22분, 35분).
 - TOTAL ESTIMATE: Sum entry fees + meals + local transport roughly. Exclude flights and accommodation. Format as Korean estimate per person.
+- COORDS (mandatory for EVERY item): Provide approximate latitude/longitude in decimal degrees for the actual place location. Use your geographic knowledge of well-known landmarks. The values must be plausible real-world coordinates for the destination's region (e.g., for Tokyo, latitudes near 35.6-35.8, longitudes near 139.6-139.9). NEVER return 0,0 or random numbers. If unsure of an exact location, use the coordinates of the nearest well-known landmark within the same neighborhood. Accuracy within ~500m is acceptable.
 
 CRITICAL CONSTRAINTS (must follow strictly):
 1. STYLE MATCHING: At LEAST 70% of all places in the entire itinerary must directly match the user's selected travel styles. Pick places that genuinely fit the chosen vibes. Do NOT pad with random tourist spots from unrelated styles.
@@ -167,6 +172,15 @@ REQUIREMENTS:
         seen.add(key);
         return true;
       });
+    }
+
+    // After dedupe, ensure no day is left empty
+    const nonEmptyDays = validDays.filter(d => d.items.length > 0);
+    if (nonEmptyDays.length === 0) {
+      return NextResponse.json(
+        { error: "AI가 생성한 일정에 유효한 장소가 없습니다. 다시 시도해주세요." },
+        { status: 502 }
+      );
     }
 
     return NextResponse.json(itinerary);

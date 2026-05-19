@@ -2,6 +2,8 @@
 
 @import "tailwindcss";
 
+@import 'leaflet/dist/leaflet.css';
+
 :root,
 :root[data-theme="dark"] {
   --bg-deep:       #080c18;
