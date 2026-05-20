@@ -12,6 +12,7 @@ import {
   sanitizeItineraryCoords,
   buildDateContext,
   verifyMissingCoordsViaNominatim,
+  parseDurationDays,
 } from "@/lib/llmHelpers";
 import type { MockItinerary } from "@/data/mockItinerary";
 
@@ -63,7 +64,15 @@ Rules:
 Hard constraints:
 1. STYLE MATCH: ≥70% of all places must directly match the user's selected styles. No filler.
 2. UNIQUE PLACES: every "place" across ALL days appears exactly once.
-3. ROUTE: cluster geographically nearby places within each day.`;
+3. ROUTE: cluster geographically nearby places within each day.
+
+DO NOT:
+- Use generic placeholders like "유명 맛집", "현지 카페", "이름있는 라멘집". Always use a specific, named place.
+- Suggest global chains (Starbucks, McDonald's, Burger King) unless the chain location is itself a tourist landmark.
+- Pad with random tourist clichés (e.g. "OO 박물관", "OO 성당") that don't match the user's selected styles.
+- Suggest places typically closed on the trip's weekdays — if Trip dates are provided, respect weekly closures (most museums close Monday, some shops close Tuesday in Korea/Japan).
+- Repeat the same description pattern across items ("아름다운 ...", "유명한 ..." every time).
+- Recommend obviously fake or unverifiable places.`;
 
 export async function POST(req: NextRequest) {
   // ── Input parsing ──
@@ -106,6 +115,40 @@ Pick a mix of must-see and hidden gems within the chosen styles. Use specific, w
   // if the client disconnects mid-stream (saves quota).
   const upstreamAbort = new AbortController();
 
+  // ── B. Length-adaptive max_tokens ────────────────────────────
+  // 1박 2일 → ~2,200, 7박 8일 → 4,096 (cap). Shorter trips finish faster
+  // and use less of the daily Groq token budget.
+  const tripDays = parseDurationDays(duration);
+  const dynamicMaxTokens = Math.min(4096, 1500 + tripDays * 350);
+
+  // Validate the shape after parsing. Returns null if OK, or a Korean-readable
+  // reason string we can feed into a retry hint.
+  function validateItinerary(it: unknown): string | null {
+    if (!it || typeof it !== "object") return "응답이 객체가 아닙니다";
+    const x = it as Partial<MockItinerary>;
+    if (typeof x.destination !== "string" || !x.destination)
+      return "destination 필드 누락";
+    if (typeof x.duration !== "string" || !x.duration)
+      return "duration 필드 누락";
+    if (!Array.isArray(x.days) || x.days.length === 0)
+      return "days 배열이 비어 있음";
+    let anyValidItem = false;
+    for (const day of x.days) {
+      if (!day || typeof day !== "object" || !Array.isArray(day.items)) continue;
+      for (const item of day.items) {
+        if (item && typeof item === "object" &&
+            typeof (item as { place?: unknown }).place === "string" &&
+            (item as { place: string }).place.trim().length > 0) {
+          anyValidItem = true;
+          break;
+        }
+      }
+      if (anyValidItem) break;
+    }
+    if (!anyValidItem) return "유효한 장소가 하나도 없음";
+    return null;
+  }
+
   const stream = new ReadableStream({
     async start(controller) {
       const send = (event: Record<string, unknown>) => {
@@ -120,6 +163,8 @@ Pick a mix of must-see and hidden gems within the chosen styles. Use specific, w
         send({ type: "progress", phase: "thinking", message: `${destination} 일정을 구상 중...`, progress: 0.05 });
 
         const groq = new Groq({ apiKey });
+
+        // ─── First attempt: streaming ────────────────────────────
         const completion = await groq.chat.completions.create(
           {
             model: "llama-3.3-70b-versatile",
@@ -128,14 +173,13 @@ Pick a mix of must-see and hidden gems within the chosen styles. Use specific, w
               { role: "user", content: userPrompt },
             ],
             temperature: 0.7,
-            max_tokens: 4096,
+            max_tokens: dynamicMaxTokens,
             stream: true,
             response_format: { type: "json_object" },
           },
           { signal: upstreamAbort.signal }
         );
 
-        // Accumulate streamed text, detect "Day N" markers to emit progress events
         let fullText = "";
         let lastReportedDay = 0;
         for await (const chunk of completion) {
@@ -150,42 +194,94 @@ Pick a mix of must-see and hidden gems within the chosen styles. Use specific, w
               type: "progress",
               phase: "day",
               message: `Day ${dayCount} 코스를 채우는 중...`,
-              progress: Math.min(0.85, 0.15 + dayCount * 0.18),
+              progress: Math.min(0.75, 0.15 + dayCount * 0.15),
             });
           }
         }
 
-        send({ type: "progress", phase: "finalizing", message: "시간과 동선을 정리하는 중...", progress: 0.9 });
-
-        // ── Parse + validate shape ──
-        let itinerary: MockItinerary;
+        // ── Parse first attempt ──
+        let itinerary: MockItinerary | null = null;
+        let parseErr: string | null = null;
         try {
           itinerary = JSON.parse(fullText) as MockItinerary;
         } catch {
-          send({ type: "error", error: "AI 응답 형식이 올바르지 않습니다. 다시 시도해주세요." });
-          controller.close();
-          return;
+          parseErr = "JSON parse 실패";
         }
 
-        if (
-          typeof itinerary?.destination !== "string" ||
-          typeof itinerary?.duration !== "string" ||
-          !Array.isArray(itinerary?.days) ||
-          itinerary.days.length === 0
-        ) {
-          send({ type: "error", error: "AI가 생성한 일정의 구조가 올바르지 않습니다." });
-          controller.close();
-          return;
+        const shapeIssue = itinerary ? validateItinerary(itinerary) : parseErr;
+
+        // ─── A. Retry once on failure ────────────────────────────
+        if (shapeIssue) {
+          console.warn("[generate] first attempt invalid:", shapeIssue);
+          send({
+            type: "progress",
+            phase: "retry",
+            message: "응답을 보완하는 중...",
+            progress: 0.8,
+          });
+
+          try {
+            const retryCompletion = await groq.chat.completions.create(
+              {
+                model: "llama-3.3-70b-versatile",
+                messages: [
+                  { role: "system", content: SYSTEM_PROMPT },
+                  { role: "user", content: userPrompt },
+                  // Show the model its broken attempt so it doesn't repeat the same error
+                  { role: "assistant", content: fullText.slice(0, 2000) },
+                  {
+                    role: "user",
+                    content: `이전 응답에 문제가 있었습니다: "${shapeIssue}". 위 JSON 스키마를 정확히 지켜서 다시 만들어주세요. 모든 day의 items 배열에 유효한 place, category, duration이 포함되어야 합니다. JSON 객체 외에는 아무것도 출력하지 마세요.`,
+                  },
+                ],
+                temperature: 0.5, // less random on retry
+                max_tokens: dynamicMaxTokens,
+                stream: false,
+                response_format: { type: "json_object" },
+              },
+              { signal: upstreamAbort.signal }
+            );
+
+            const retryText = retryCompletion.choices[0]?.message?.content ?? "";
+            try {
+              itinerary = JSON.parse(retryText) as MockItinerary;
+            } catch {
+              itinerary = null;
+            }
+
+            const retryIssue = itinerary ? validateItinerary(itinerary) : "JSON parse 실패(재시도)";
+            if (retryIssue) {
+              console.error("[generate] retry also failed:", retryIssue);
+              send({
+                type: "error",
+                error: "AI가 두 번 모두 잘못된 응답을 반환했어요. 잠시 후 다시 시도해주세요.",
+              });
+              controller.close();
+              return;
+            }
+          } catch (err) {
+            if ((err as Error)?.name === "AbortError") {
+              try { controller.close(); } catch { /* ignore */ }
+              return;
+            }
+            console.error("[generate] retry threw:", err);
+            send({ type: "error", error: "AI 호출 중 오류가 발생했습니다." });
+            controller.close();
+            return;
+          }
         }
+
+        // From here, `itinerary` is guaranteed non-null and shape-valid
+        send({ type: "progress", phase: "finalizing", message: "시간과 동선을 정리하는 중...", progress: 0.9 });
 
         // Drop malformed days
-        itinerary.days = itinerary.days.filter(
+        itinerary!.days = itinerary!.days.filter(
           d => typeof d === "object" && d !== null && Array.isArray(d.items)
         );
 
-        // Cross-day place dedupe (safety net — prompt already says unique)
+        // Cross-day place dedupe (safety net)
         const seen = new Set<string>();
-        for (const day of itinerary.days) {
+        for (const day of itinerary!.days) {
           day.items = day.items.filter(item => {
             const key = (item?.place ?? "").trim().toLowerCase().replace(/\s+/g, "");
             if (!key || seen.has(key)) return false;
@@ -193,22 +289,22 @@ Pick a mix of must-see and hidden gems within the chosen styles. Use specific, w
             return true;
           });
         }
-        itinerary.days = itinerary.days.filter(d => d.items.length > 0);
+        itinerary!.days = itinerary!.days.filter(d => d.items.length > 0);
 
-        if (itinerary.days.length === 0) {
+        if (itinerary!.days.length === 0) {
           send({ type: "error", error: "AI가 생성한 일정에 유효한 장소가 없습니다." });
           controller.close();
           return;
         }
 
         // ── Post-process: drop implausible coords + normalize times ──
-        sanitizeItineraryCoords(itinerary);
-        normalizeItineraryTimes(itinerary);
+        sanitizeItineraryCoords(itinerary!);
+        normalizeItineraryTimes(itinerary!);
 
         // Best-effort coord recovery via Nominatim (capped, throttled)
         send({ type: "progress", phase: "geocoding", message: "장소 좌표를 확인하는 중...", progress: 0.95 });
         try {
-          await verifyMissingCoordsViaNominatim(itinerary, 6);
+          await verifyMissingCoordsViaNominatim(itinerary!, 6);
         } catch (err) {
           console.warn("[generate] nominatim recovery failed:", err);
         }
