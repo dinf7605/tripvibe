@@ -190,12 +190,18 @@ export async function geocodeWithNominatim(
   try {
     const q = encodeURIComponent(`${place}, ${destination}`);
     const url = `https://nominatim.openstreetmap.org/search?q=${q}&format=json&limit=1`;
+    // Default 3s timeout — Nominatim can be slow under load, but we'd rather
+    // fall back to LLM coords than hang the whole request.
+    const timeoutSignal = AbortSignal.timeout(3000);
+    const combined: AbortSignal = signal
+      ? AbortSignal.any([signal, timeoutSignal])
+      : timeoutSignal;
     const res = await fetch(url, {
       headers: {
         "User-Agent": "TripVibe/1.0 (https://tripvibe.app)",
         "Accept-Language": "ko,en",
       },
-      signal,
+      signal: combined,
     });
     if (!res.ok) return null;
     const data = (await res.json()) as Array<{ lat?: string; lon?: string }>;

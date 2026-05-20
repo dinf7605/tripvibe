@@ -2,6 +2,9 @@ import Groq from "groq-sdk";
 import { NextRequest, NextResponse } from "next/server";
 import { isCoordPlausible, geocodeWithNominatim } from "@/lib/llmHelpers";
 
+// LLM round-trip (~2s) + Nominatim fallback (~3s) + buffer
+export const maxDuration = 20;
+
 const STYLE_GUIDE: Record<string, string> = {
   healing:   "조용한 힐링 스폿(온천, 카페, 공원 등)",
   food:      "현지인이 추천하는 맛집과 카페",

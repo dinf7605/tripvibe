@@ -1,5 +1,12 @@
 import Groq from "groq-sdk";
 import { NextRequest } from "next/server";
+
+// Vercel Hobby plan allows up to 60s. Worst case timeline:
+//   LLM streaming  ~3s
+//   Nominatim recovery (up to 6 lookups × 1.1s)  ~7s
+//   Buffer for cold starts / dedupe  ~5s
+// 30s is comfortable headroom without hitting the Pro plan.
+export const maxDuration = 30;
 import {
   normalizeItineraryTimes,
   sanitizeItineraryCoords,
@@ -94,6 +101,11 @@ Pick a mix of must-see and hidden gems within the chosen styles. Use specific, w
 
   // ── Streaming response (NDJSON: one JSON event per line) ──
   const encoder = new TextEncoder();
+
+  // Abort controller fed to Groq's request so we can stop token generation
+  // if the client disconnects mid-stream (saves quota).
+  const upstreamAbort = new AbortController();
+
   const stream = new ReadableStream({
     async start(controller) {
       const send = (event: Record<string, unknown>) => {
@@ -108,17 +120,20 @@ Pick a mix of must-see and hidden gems within the chosen styles. Use specific, w
         send({ type: "progress", phase: "thinking", message: `${destination} 일정을 구상 중...`, progress: 0.05 });
 
         const groq = new Groq({ apiKey });
-        const completion = await groq.chat.completions.create({
-          model: "llama-3.3-70b-versatile",
-          messages: [
-            { role: "system", content: SYSTEM_PROMPT },
-            { role: "user", content: userPrompt },
-          ],
-          temperature: 0.7,
-          max_tokens: 4096,
-          stream: true,
-          response_format: { type: "json_object" },
-        });
+        const completion = await groq.chat.completions.create(
+          {
+            model: "llama-3.3-70b-versatile",
+            messages: [
+              { role: "system", content: SYSTEM_PROMPT },
+              { role: "user", content: userPrompt },
+            ],
+            temperature: 0.7,
+            max_tokens: 4096,
+            stream: true,
+            response_format: { type: "json_object" },
+          },
+          { signal: upstreamAbort.signal }
+        );
 
         // Accumulate streamed text, detect "Day N" markers to emit progress events
         let fullText = "";
@@ -209,7 +224,9 @@ Pick a mix of must-see and hidden gems within the chosen styles. Use specific, w
     },
 
     cancel() {
-      // Client disconnected — Groq's iterator will end on its own
+      // Client disconnected — abort the upstream Groq request so we stop
+      // paying for tokens nobody is reading.
+      upstreamAbort.abort();
     },
   });
 

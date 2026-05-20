@@ -38,6 +38,8 @@ export async function GET(req: NextRequest) {
         headers: { "User-Agent": "TripVibe/1.0" },
         // Rates change daily — cache 6 hours
         next: { revalidate: 60 * 60 * 6 },
+        // Bail out if Frankfurter is slow — better to fail fast than hang
+        signal: AbortSignal.timeout(5000),
       }
     );
     if (!res.ok) {

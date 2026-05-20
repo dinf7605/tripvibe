@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import Link from "next/link";
 import { useAuth } from "@/context/AuthContext";
@@ -89,6 +89,17 @@ export default function HomePage() {
   // rotation pauses so we don't overwrite real status with random copy.
   const [streamingActive, setStreamingActive] = useState(false);
 
+  // AbortController for the in-flight /api/generate stream — lets us stop
+  // the upstream LLM call if the user navigates away mid-generation.
+  const generateAbortRef = useRef<AbortController | null>(null);
+
+  // Abort any in-flight generate request when the user leaves this page
+  useEffect(() => {
+    return () => {
+      if (generateAbortRef.current) generateAbortRef.current.abort();
+    };
+  }, []);
+
   useEffect(() => {
     if (!errorMsg) return;
     const t = setTimeout(() => setErrorMsg(null), 5000);
@@ -129,11 +140,17 @@ export default function HomePage() {
     setLoadingProgress(0);
     setStreamingActive(false);
 
+    // Abort any earlier in-flight request, install a fresh controller
+    if (generateAbortRef.current) generateAbortRef.current.abort();
+    const controller = new AbortController();
+    generateAbortRef.current = controller;
+
     try {
       const res = await fetch("/api/generate", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ destination, duration, styles: selectedStyles, startDate }),
+        signal: controller.signal,
       });
 
       if (!res.ok || !res.body) {
@@ -220,10 +237,22 @@ export default function HomePage() {
 
       router.push("/result");
     } catch (err) {
+      // Silent abort — user navigated away or started another generation
+      if (err instanceof Error && err.name === "AbortError") {
+        setIsLoading(false);
+        setStreamingActive(false);
+        setLoadingProgress(0);
+        return;
+      }
       setErrorMsg(err instanceof Error ? err.message : "알 수 없는 오류가 발생했습니다.");
       setIsLoading(false);
       setStreamingActive(false);
       setLoadingProgress(0);
+    } finally {
+      // Only clear if the controller we set is still the active one
+      if (generateAbortRef.current === controller) {
+        generateAbortRef.current = null;
+      }
     }
   };
 
