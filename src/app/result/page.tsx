@@ -459,21 +459,14 @@ export default function ResultPage() {
   const handleShare = async () => {
     if (!itinerary) return;
     const text = itineraryToText(itinerary);
-    const title = `${itinerary.destination} ${itinerary.duration} 여행 일정`;
 
-    if (typeof navigator !== "undefined" && typeof navigator.share === "function") {
-      try {
-        await navigator.share({ title, text });
-        return;
-      } catch (err) {
-        if (err instanceof Error && err.name === "AbortError") return;
-      }
-    }
-
+    // Behavior simplified: always copy to clipboard, never open the OS share sheet.
+    // Falls back to a hidden textarea + execCommand for older browsers / non-secure
+    // contexts where navigator.clipboard isn't available.
     if (typeof navigator !== "undefined" && navigator.clipboard?.writeText) {
       try {
         await navigator.clipboard.writeText(text);
-        showToast("일정이 클립보드에 복사되었어요. 원하는 곳에 붙여넣으세요.");
+        showToast("일정이 클립보드에 복사되었어요!");
         return;
       } catch {
         // fall through to legacy
@@ -481,9 +474,9 @@ export default function ResultPage() {
     }
 
     if (legacyCopy(text)) {
-      showToast("일정이 클립보드에 복사되었어요. 원하는 곳에 붙여넣으세요.");
+      showToast("일정이 클립보드에 복사되었어요!");
     } else {
-      showToast("이 브라우저에서는 공유를 지원하지 않습니다. '저장' 버튼을 이용해주세요.", "error");
+      showToast("클립보드 복사에 실패했어요. '저장' 버튼으로 파일을 받아주세요.", "error");
     }
   };
 

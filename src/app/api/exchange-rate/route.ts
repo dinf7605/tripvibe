@@ -10,6 +10,7 @@ const ALLOWED = new Set([
   "USD", "EUR", "JPY", "GBP", "HKD", "SGD", "AUD",
   "THB", "IDR", "CNY", "TWD", "MYR", "PHP", "VND",
   "CHF", "CAD", "NZD", "INR", "MXN", "BRL",
+  "KRW", // ← target currency (always the "to" for our calculator)
 ]);
 
 export async function GET(req: NextRequest) {
