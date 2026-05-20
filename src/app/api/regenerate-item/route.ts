@@ -87,9 +87,17 @@ export async function POST(req: NextRequest) {
   if (typeof current.place !== "string" || !current.place.trim()) {
     return NextResponse.json({ error: "currentItem.place가 누락되었습니다." }, { status: 400 });
   }
-  if (typeof current.category !== "string" || !VALID_CATEGORIES.includes(current.category as Category)) {
-    return NextResponse.json({ error: "currentItem.category가 올바르지 않습니다." }, { status: 400 });
-  }
+  // Normalize category — the LLM occasionally emits style IDs ("insta", "nightlife") as
+  // category values even though the official set is smaller. Coerce to the nearest valid
+  // category instead of hard-rejecting with a 400 that the user can't recover from.
+  const CATEGORY_ALIASES: Record<string, Category> = {
+    insta: "activity",
+    nightlife: "activity",
+  };
+  const rawCat = typeof current.category === "string" ? current.category.trim().toLowerCase() : "";
+  const resolvedCategory: Category = VALID_CATEGORIES.includes(rawCat as Category)
+    ? (rawCat as Category)
+    : (CATEGORY_ALIASES[rawCat] ?? "activity");
 
   // Env check
   const apiKey = process.env.GROQ_API_KEY;
@@ -112,7 +120,7 @@ Selected travel styles: ${styles.length ? styles.join(", ") : "(없음)"}${style
 The item to REPLACE:
 - time: ${current.time ?? "(none)"}
 - place: ${current.place}
-- category: ${current.category}
+- category: ${resolvedCategory}
 - duration: ${current.duration ?? "(none)"}
 - existing description: ${current.description ?? "(none)"}
 
@@ -158,9 +166,11 @@ Generate ONE alternative place. Same time, same category, similar duration. Outp
     if (typeof it.place !== "string" || !it.place.trim()) {
       return NextResponse.json({ error: "AI 응답에 장소명이 없습니다." }, { status: 502 });
     }
-    if (typeof it.category !== "string" || !VALID_CATEGORIES.includes(it.category as Category)) {
-      return NextResponse.json({ error: "AI 응답의 카테고리가 올바르지 않습니다." }, { status: 502 });
-    }
+    // Coerce AI-returned category the same way we did for the input — never 502 over this
+    const rawAiCat = typeof it.category === "string" ? it.category.trim().toLowerCase() : "";
+    const aiCategory: Category = VALID_CATEGORIES.includes(rawAiCat as Category)
+      ? (rawAiCat as Category)
+      : (CATEGORY_ALIASES[rawAiCat] ?? resolvedCategory);
 
     // Did we just get the same place back?
     if (it.place.trim() === current.place.trim()) {
@@ -196,7 +206,7 @@ Generate ONE alternative place. Same time, same category, similar duration. Outp
       time: typeof it.time === "string" && it.time.trim() ? it.time : current.time,
       place: it.place.trim(),
       description: typeof it.description === "string" ? it.description.trim() : "",
-      category: it.category,
+      category: aiCategory,
       duration: typeof it.duration === "string" && it.duration.trim() ? it.duration : current.duration,
       cost: typeof it.cost === "string" && it.cost.trim() ? it.cost : current.cost,
       coords,
