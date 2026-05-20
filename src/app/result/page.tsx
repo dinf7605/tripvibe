@@ -463,10 +463,20 @@ export default function ResultPage() {
     // Behavior simplified: always copy to clipboard, never open the OS share sheet.
     // Falls back to a hidden textarea + execCommand for older browsers / non-secure
     // contexts where navigator.clipboard isn't available.
+    const notifyCopied = () => {
+      // Reset toast first so even if a previous "copied" toast is still on-screen,
+      // the new one re-triggers the fade-in animation and the timer.
+      if (toastTimerRef.current) clearTimeout(toastTimerRef.current);
+      setToast(null);
+      requestAnimationFrame(() => {
+        showToast("✓ 일정이 클립보드에 복사되었어요!");
+      });
+    };
+
     if (typeof navigator !== "undefined" && navigator.clipboard?.writeText) {
       try {
         await navigator.clipboard.writeText(text);
-        showToast("일정이 클립보드에 복사되었어요!");
+        notifyCopied();
         return;
       } catch {
         // fall through to legacy
@@ -474,7 +484,7 @@ export default function ResultPage() {
     }
 
     if (legacyCopy(text)) {
-      showToast("일정이 클립보드에 복사되었어요!");
+      notifyCopied();
     } else {
       showToast("클립보드 복사에 실패했어요. '저장' 버튼으로 파일을 받아주세요.", "error");
     }

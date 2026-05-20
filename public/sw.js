@@ -1,4 +1,4 @@
-const CACHE = "tripvibe-v2";
+const CACHE = "tripvibe-v3";
 const PRECACHE = ["/manifest.webmanifest", "/icon.svg"];
 
 self.addEventListener("install", (event) => {
